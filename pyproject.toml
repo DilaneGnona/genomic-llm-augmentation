@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "experiment_snp"
+version = "0.1.0"
+description = "SNP preprocessing, modeling and augmentation"
+authors = [{ name = "Experiment Team" }]
+requires-python = ">=3.10"
+readme = "README.md"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

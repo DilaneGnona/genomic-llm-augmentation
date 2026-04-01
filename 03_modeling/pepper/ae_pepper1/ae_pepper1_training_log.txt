@@ -1,0 +1,9 @@
+latent_dim=32
+baseline_parquet_train_time_s=2.0290
+baseline_csv_train_time_s=2.1059
+epochs_log=C:\Users\OMEN\Desktop\experiment_snp\03_modeling\pepper\ae_pepper1_epochs_log.csv
+results_csv=C:\Users\OMEN\Desktop\experiment_snp\03_modeling\pepper\ae_pepper1_parquet_results.csv
+r2_png=C:\Users\OMEN\Desktop\experiment_snp\03_modeling\pepper\ae_pepper1_r2_parquet.png
+rmse_png=C:\Users\OMEN\Desktop\experiment_snp\03_modeling\pepper\ae_pepper1_rmse_parquet.png
+loss_png=C:\Users\OMEN\Desktop\experiment_snp\03_modeling\pepper\ae_pepper1_reconstruction_loss.png
+model_path=C:\Users\OMEN\Desktop\experiment_snp\03_modeling\pepper\ae_pepper1_model.h5

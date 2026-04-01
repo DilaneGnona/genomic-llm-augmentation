@@ -1,0 +1,20 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+
+# Data
+01_raw_data/
+02_processed_data/
+04_augmentation/
+
+# Results & Logs
+logs/
+03_modeling_results/
+!03_modeling_results/*.json
+!03_modeling_results/**/*.png
+
+# OS files
+.DS_Store
+Thumbs.db
+

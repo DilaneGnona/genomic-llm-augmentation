@@ -1,0 +1,9 @@
+scenario=baseline, n_iter=99, reached_max_iter=False
+scenario=glm46, n_iter=138, reached_max_iter=False
+scenario=llama3, n_iter=138, reached_max_iter=False
+scenario=deepseek, n_iter=138, reached_max_iter=False
+baseline_parquet_train_time_s=0.1072
+baseline_csv_train_time_s=0.1059
+results_csv=C:\Users\OMEN\Desktop\experiment_snp\03_modeling\pepper\ipk_out_raw\mlp_ipk_parquet_llms_results.csv
+r2_png=C:\Users\OMEN\Desktop\experiment_snp\03_modeling\pepper\ipk_out_raw\mlp_ipk_r2_parquet.png
+rmse_png=C:\Users\OMEN\Desktop\experiment_snp\03_modeling\pepper\ipk_out_raw\mlp_ipk_rmse_parquet.png

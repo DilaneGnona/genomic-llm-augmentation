@@ -1,0 +1,3 @@
+Using optimized Parquet loader for X features.
+Device: cuda, threads=16
+Start TabNet: baseline_gpu

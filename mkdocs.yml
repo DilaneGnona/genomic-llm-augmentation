@@ -1,0 +1,6 @@
+site_name: experiment_snp
+nav:
+  - Accueil: docs/index.md
+  - Schéma des données: docs/data_schema.md
+theme:
+  name: mkdocs

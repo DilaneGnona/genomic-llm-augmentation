@@ -1,0 +1,7 @@
+baseline_parquet_train_time_s=1.9315
+baseline_csv_train_time_s=1.8288
+epochs_log=C:\Users\OMEN\Desktop\experiment_snp\03_modeling\pepper\transformer_corrected_epochs_log.csv
+results_csv=C:\Users\OMEN\Desktop\experiment_snp\03_modeling\pepper\transformer_pepper1_corrected_results.csv
+r2_png=C:\Users\OMEN\Desktop\experiment_snp\03_modeling\pepper\transformer_corrected_r2.png
+loss_png=C:\Users\OMEN\Desktop\experiment_snp\03_modeling\pepper\transformer_corrected_loss.png
+model_path=C:\Users\OMEN\Desktop\experiment_snp\03_modeling\pepper\transformer_pepper1_corrected_model.h5
