@@ -10,6 +10,14 @@ from datetime import datetime
 from io import StringIO
 import matplotlib.pyplot as plt
 import seaborn as sns
+import optuna
+from sklearn.model_selection import KFold, train_test_split
+from sklearn.linear_model import Ridge
+from sklearn.metrics import r2_score, mean_squared_error
+from sklearn.feature_selection import SelectKBest, f_regression
+import torch
+import joblib
+import shap
 
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -191,13 +199,49 @@ class UnifiedGenomicPipeline:
             return combined_df
         return real_df
 
-    def train_ensemble(self, df, k_features=1000):
-        logging.info(f"Starting Ensemble Training (LightGBM + MLP) with k={k_features} features...")
-        from sklearn.model_selection import train_test_split
-        from sklearn.metrics import r2_score, mean_squared_error
-        from sklearn.feature_selection import SelectKBest, f_regression
-        import torch
-        import joblib
+    def optimize_hyperparameters(self, X, y, n_trials=20):
+        logging.info(f"Starting Bayesian Optimization (Optuna) for LightGBM - {n_trials} trials...")
+        
+        def objective(trial):
+            param = {
+                'objective': 'regression',
+                'metric': 'rmse',
+                'verbosity': -1,
+                'boosting_type': 'gbdt',
+                'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.1),
+                'n_estimators': trial.suggest_int('n_estimators', 100, 1000),
+                'num_leaves': trial.suggest_int('num_leaves', 20, 150),
+                'max_depth': trial.suggest_int('max_depth', 3, 12),
+                'min_child_samples': trial.suggest_int('min_child_samples', 5, 50),
+                'reg_alpha': trial.suggest_float('reg_alpha', 1e-8, 10.0, log=True),
+                'reg_lambda': trial.suggest_float('reg_lambda', 1e-8, 10.0, log=True),
+                'random_state': 42
+            }
+            
+            from lightgbm import LGBMRegressor
+            kf = KFold(n_splits=3, shuffle=True, random_state=42)
+            scores = []
+            
+            for train_idx, val_idx in kf.split(X):
+                X_t, X_v = X.iloc[train_idx], X.iloc[val_idx]
+                y_t, y_v = y.iloc[train_idx], y.iloc[val_idx]
+                
+                model = LGBMRegressor(**param)
+                model.fit(X_t, y_t)
+                preds = model.predict(X_v)
+                scores.append(r2_score(y_v, preds))
+                
+            return np.mean(scores)
+
+        study = optuna.create_study(direction='maximize')
+        study.optimize(objective, n_trials=n_trials)
+        
+        logging.info(f"  Best Trial R2: {study.best_value:.4f}")
+        logging.info(f"  Best Params: {study.best_params}")
+        return study.best_params
+
+    def train_ensemble(self, df, k_features=1000, n_folds=5, n_trials=20):
+        logging.info(f"Starting ADVANCED Ensemble Training (Stacking + K-Fold) with k={k_features} features...")
         
         X = df.drop(['Sample_ID', self.target_col], axis=1)
         y = df[self.target_col]
@@ -219,86 +263,146 @@ class UnifiedGenomicPipeline:
             with open(os.path.join(self.results_dir, "models", "selected_features.json"), "w") as f:
                 json.dump(feature_names, f)
         
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        # Hold-out set for final verification
+        X_train_full, X_holdout, y_train_full, y_holdout = train_test_split(X, y, test_size=0.15, random_state=42)
         
-        results = {}
+        # 1. Hyperparameter Optimization for LightGBM
+        best_lgbm_params = self.optimize_hyperparameters(X_train_full, y_train_full, n_trials=n_trials)
         
-        try:
-            # 1. LightGBM
-            logging.info("  Training LightGBM...")
-            lgbm = build_model("lightgbm")
-            if lgbm:
-                lgbm.fit(X_train, y_train)
-                y_pred_lgbm = lgbm.predict(X_test)
-                results['lightgbm'] = {'r2': r2_score(y_test, y_pred_lgbm), 'pred': y_pred_lgbm}
-                logging.info(f"    LightGBM R2: {results['lightgbm']['r2']:.4f}")
-            else:
-                logging.warning("    LightGBM not available, skipping.")
-                results['lightgbm'] = {'r2': 0, 'pred': np.zeros_like(y_test)}
+        # 2. K-Fold Stacking
+        kf = KFold(n_splits=n_folds, shuffle=True, random_state=42)
+        meta_features = np.zeros((len(X_train_full), 2)) # Columns: [LGBM_pred, MLP_pred]
+        
+        logging.info(f"  Performing {n_folds}-Fold Stacking...")
+        
+        for fold, (train_idx, val_idx) in enumerate(kf.split(X_train_full)):
+            X_tr, X_val = X_train_full.iloc[train_idx], X_train_full.iloc[val_idx]
+            y_tr, y_val = y_train_full.iloc[train_idx], y_train_full.iloc[val_idx]
             
-            # 2. MLP
-            logging.info("  Training MLP (50 epochs)...")
-            input_dim = X_train.shape[1]
-            model_dl = build_model("mlp", input_dim=input_dim)
+            # Base Model 1: LightGBM
+            from lightgbm import LGBMRegressor
+            lgbm = LGBMRegressor(**best_lgbm_params)
+            lgbm.fit(X_tr, y_tr)
+            meta_features[val_idx, 0] = lgbm.predict(X_val)
             
-            if model_dl:
-                # Simple PyTorch training loop
-                X_t = torch.tensor(X_train.values, dtype=torch.float32)
-                y_t = torch.tensor(y_train.values, dtype=torch.float32).view(-1, 1)
-                optimizer = torch.optim.Adam(model_dl.parameters(), lr=0.001)
+            # Base Model 2: MLP (PyTorch)
+            input_dim = X_tr.shape[1]
+            mlp = build_model("mlp", input_dim=input_dim)
+            if mlp:
+                X_tr_t = torch.tensor(X_tr.values, dtype=torch.float32)
+                y_tr_t = torch.tensor(y_tr.values, dtype=torch.float32).view(-1, 1)
+                optimizer = torch.optim.Adam(mlp.parameters(), lr=0.001)
                 criterion = torch.nn.MSELoss()
                 
-                model_dl.train()
-                for epoch in range(50):
+                mlp.train()
+                for _ in range(30): # Fewer epochs for fold training
                     optimizer.zero_grad()
-                    outputs = model_dl(X_t)
-                    loss = criterion(outputs, y_t)
+                    loss = criterion(mlp(X_tr_t), y_tr_t)
                     loss.backward()
                     optimizer.step()
-                    if (epoch+1) % 10 == 0:
-                        logging.info(f"    Epoch {epoch+1}/50, Loss: {loss.item():.4f}")
-                    
-                model_dl.eval()
-                with torch.no_grad():
-                    X_test_t = torch.tensor(X_test.values, dtype=torch.float32)
-                    y_pred_dl = model_dl(X_test_t).numpy().flatten()
-                    results['mlp'] = {'r2': r2_score(y_test, y_pred_dl), 'pred': y_pred_dl}
-                    logging.info(f"    MLP R2: {results['mlp']['r2']:.4f}")
-            else:
-                logging.warning("    MLP not available, skipping.")
-                results['mlp'] = {'r2': 0, 'pred': np.zeros_like(y_test)}
                 
-            # 3. Ensemble (Weighted Average)
-            logging.info("  Creating Ensemble (Dynamic Weighting based on R2)...")
-            # Heuristic: Use weights proportional to R2 if positive, else 0
-            w_lgbm = max(0.001, results['lightgbm']['r2']) if results['lightgbm']['r2'] > 0 else 0.001
-            w_dl = max(0.001, results.get('mlp', {'r2': 0})['r2']) if results.get('mlp', {'r2': 0})['r2'] > 0 else 0.001
+                mlp.eval()
+                with torch.no_grad():
+                    X_val_t = torch.tensor(X_val.values, dtype=torch.float32)
+                    meta_features[val_idx, 1] = mlp(X_val_t).numpy().flatten()
             
-            # If both are very low, default to 0.7/0.3 but warn
-            if w_lgbm == 0.001 and w_dl == 0.001:
-                logging.warning("    Both models have poor R2. Using default 0.7/0.3 weights.")
-                w_lgbm, w_dl = 0.7, 0.3
+            logging.info(f"    Fold {fold+1} complete.")
             
-            total_w = w_lgbm + w_dl
-            y_pred_dl = results.get('mlp', {'pred': np.zeros_like(y_test)})['pred']
-            y_pred_ensemble = (w_lgbm * results['lightgbm']['pred'] + w_dl * y_pred_dl) / total_w
-            results['ensemble'] = {'r2': r2_score(y_test, y_pred_ensemble), 'pred': y_pred_ensemble}
+        # 3. Train Meta-Learner (Ridge)
+        logging.info("  Training Meta-Learner (Ridge)...")
+        meta_model = Ridge(alpha=1.0)
+        meta_model.fit(meta_features, y_train_full)
+        
+        # 4. RR-BLUP Baseline (Master Thesis Standard)
+        logging.info("  Training RR-BLUP Baseline (G-BLUP equivalent)...")
+        from sklearn.linear_model import RidgeCV
+        rr_blup = RidgeCV(alphas=np.logspace(-3, 3, 10))
+        rr_blup.fit(X_train_full, y_train_full)
+        pred_rrblup = rr_blup.predict(X_holdout)
+        r2_rrblup = r2_score(y_holdout, pred_rrblup)
+        logging.info(f"    RR-BLUP (Standard) Hold-out R2: {r2_rrblup:.4f}")
+
+        # 5. Final Models (Train on full X_train_full)
+        logging.info("  Training final base models on full training set...")
+        final_lgbm = LGBMRegressor(**best_lgbm_params)
+        final_lgbm.fit(X_train_full, y_train_full)
+        
+        final_mlp = build_model("mlp", input_dim=X.shape[1])
+        if final_mlp:
+            X_full_t = torch.tensor(X_train_full.values, dtype=torch.float32)
+            y_full_t = torch.tensor(y_train_full.values, dtype=torch.float32).view(-1, 1)
+            optimizer = torch.optim.Adam(final_mlp.parameters(), lr=0.001)
+            criterion = torch.nn.MSELoss()
+            final_mlp.train()
+            for _ in range(50):
+                optimizer.zero_grad()
+                loss = criterion(final_mlp(X_full_t), y_full_t)
+                loss.backward()
+                optimizer.step()
+        
+        # 5. Final Prediction on Hold-out Set
+        logging.info("  Evaluating on Hold-out set...")
+        pred_lgbm = final_lgbm.predict(X_holdout)
+        
+        final_mlp.eval()
+        with torch.no_grad():
+            X_holdout_t = torch.tensor(X_holdout.values, dtype=torch.float32)
+            pred_mlp = final_mlp(X_holdout_t).numpy().flatten()
             
-            logging.info(f"    Weights: LightGBM={w_lgbm/total_w:.2f}, MLP={w_dl/total_w:.2f}")
-            logging.info(f"Ensemble R2: {results['ensemble']['r2']:.4f}")
+        holdout_meta = np.column_stack([pred_lgbm, pred_mlp])
+        pred_stacking = meta_model.predict(holdout_meta)
+        
+        r2_stack = r2_score(y_holdout, pred_stacking)
+        r2_lgbm = r2_score(y_holdout, pred_lgbm)
+        r2_mlp = r2_score(y_holdout, pred_mlp)
+        
+        logging.info(f"    LGBM Hold-out R2: {r2_lgbm:.4f}")
+        logging.info(f"    MLP Hold-out R2: {r2_mlp:.4f}")
+        logging.info(f"    STACKING Hold-out R2: {r2_stack:.4f}")
+        
+        # 6. SHAP Interpretability
+        logging.info("  Performing SHAP Interpretability analysis...")
+        try:
+            explainer = shap.TreeExplainer(final_lgbm)
+            shap_values = explainer.shap_values(X_holdout)
+            
+            plt.figure(figsize=(12, 8))
+            shap.summary_plot(shap_values, X_holdout, show=False)
+            plt.title(f"SHAP SNP Importance - {self.dataset.upper()}")
+            plt.tight_layout()
+            plt.savefig(os.path.join(self.results_dir, "plots", "shap_importance.png"))
+            plt.close()
+            
+            # Save top 20 SNPs
+            if isinstance(shap_values, list): # For multiclass/some versions
+                vals = np.abs(shap_values[0]).mean(0)
+            else:
+                vals = np.abs(shap_values).mean(0)
+            
+            feature_importance = pd.DataFrame(list(zip(X_holdout.columns, vals)), columns=['SNP', 'feature_importance_vals'])
+            feature_importance.sort_values(by=['feature_importance_vals'], ascending=False, inplace=True)
+            feature_importance.head(20).to_csv(os.path.join(self.results_dir, "models", "top_20_snps.csv"), index=False)
+            
         except Exception as e:
-            logging.error(f"Error during training: {e}")
-            import traceback
-            logging.error(traceback.format_exc())
-            return None
+            logging.warning(f"  SHAP analysis failed: {e}")
         
         # Save results
+        results = {
+            'lightgbm': {'r2': r2_lgbm},
+            'mlp': {'r2': r2_mlp},
+            'rr_blup_standard': {'r2': r2_rrblup},
+            'stacking_optimized': {'r2': r2_stack}
+        }
+        
         summary = {
             'dataset': self.dataset,
             'run_id': self.run_id,
             'samples': len(df),
             'features': X.shape[1],
-            'metrics': {m: {'r2': results[m]['r2']} for m in results if 'r2' in results[m]}
+            'metrics': results,
+            'best_params_lgbm': best_lgbm_params,
+            'meta_weights': meta_model.coef_.tolist(),
+            'meta_intercept': meta_model.intercept_
         }
         
         with open(os.path.join(self.results_dir, "summary.json"), "w") as f:
@@ -306,19 +410,20 @@ class UnifiedGenomicPipeline:
             
         # Plotting
         plt.figure(figsize=(10, 6))
-        plt.scatter(y_test, y_pred_ensemble, alpha=0.5, color='teal')
-        plt.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'r--', lw=2)
+        plt.scatter(y_holdout, pred_stacking, alpha=0.5, color='darkblue', label='Stacking Predictions')
+        plt.plot([y_holdout.min(), y_holdout.max()], [y_holdout.min(), y_holdout.max()], 'r--', lw=2)
         plt.xlabel("Actual Yield")
         plt.ylabel("Predicted Yield")
-        plt.title(f"Genomic Ensemble Prediction - {self.dataset.upper()}\n(R2={results['ensemble']['r2']:.4f}, n={len(df)})")
+        plt.title(f"ADVANCED Stacking Prediction - {self.dataset.upper()}\n(Hold-out R2={r2_stack:.4f})")
+        plt.legend()
         plt.grid(True, linestyle='--', alpha=0.7)
         plt.savefig(os.path.join(self.results_dir, "plots", "ensemble_scatter.png"))
         
-        # Save model
-        import joblib
-        joblib.dump(lgbm, os.path.join(self.results_dir, "models", "lgbm_final.joblib"))
-        if model_dl:
-            torch.save(model_dl.state_dict(), os.path.join(self.results_dir, "models", "dl_final.pth"))
+        # Save models
+        joblib.dump(final_lgbm, os.path.join(self.results_dir, "models", "lgbm_final.joblib"))
+        joblib.dump(meta_model, os.path.join(self.results_dir, "models", "meta_learner.joblib"))
+        if final_mlp:
+            torch.save(final_mlp.state_dict(), os.path.join(self.results_dir, "models", "dl_final.pth"))
         
         return summary
 
@@ -328,6 +433,7 @@ def main():
     parser.add_argument("--target", required=True, help="Target column name")
     parser.add_argument("--skip_aug", action="store_true", help="Skip LLM augmentation")
     parser.add_argument("--samples", type=int, default=200, help="Samples per LLM context")
+    parser.add_argument("--trials", type=int, default=20, help="Number of Optuna trials")
     
     args = parser.parse_args()
     
@@ -341,7 +447,7 @@ def main():
     
     df = pipeline.consolidate_data()
     if df is not None:
-        summary = pipeline.train_ensemble(df)
+        summary = pipeline.train_ensemble(df, n_trials=args.trials)
         if summary:
             logging.info("Pipeline Execution Finished Successfully!")
         else:
