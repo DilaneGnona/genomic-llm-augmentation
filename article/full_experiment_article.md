@@ -103,6 +103,7 @@ This research demonstrates that LLMs are not just tools for text generation but 
 ## **Visualizations**
 *Refer to the following generated artifacts for detailed analysis:*
 - [Performance Comparison Graph](../03_modeling_results/comparison_performance.png)
-- [Ensemble Scatter Plot](../03_modeling_results/ipk_out_raw_unified_20260424_220124/plots/ensemble_scatter.png)
-- [SHAP SNP Importance](../03_modeling_results/ipk_out_raw_unified_20260424_220124/plots/shap_importance.png)
+- [Ensemble Scatter Plot (IPK)](../03_modeling_results/ipk_out_raw_unified_benchmark_gblup/plots/ensemble_scatter.png)
+- [SHAP SNP Importance (Pepper)](../03_modeling_results/pepper_unified_benchmark_gblup/plots/shap_importance.png)
+- [SHAP SNP Importance (IPK)](../03_modeling_results/ipk_out_raw_unified_benchmark_gblup/plots/shap_importance.png)
 - [Few-Shot Learning Curve](../03_modeling_results/ipk_out_raw_unified_few_shot_bench/plots/few_shot_curve.png)
